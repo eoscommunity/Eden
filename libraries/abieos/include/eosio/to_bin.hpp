@@ -46,6 +46,18 @@ namespace eosio
       } while (val);
    }
 
+   template <typename S>
+   void varuint64_to_bin(uint64_t val, S& stream)
+   {
+      do
+      {
+         uint8_t b = val & 0x7f;
+         val >>= 7;
+         b |= ((val > 0) << 7);
+         stream.write(b);
+      } while (val);
+   }
+
    // signed leb128 encoding
    template <typename S>
    void sleb64_to_bin(int64_t val, S& stream)

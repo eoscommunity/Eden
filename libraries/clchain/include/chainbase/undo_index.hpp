@@ -11,10 +11,12 @@
 #include <boost/multi_index_container_fwd.hpp>
 #include <eosio/check.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <memory>
 #include <sstream>
 #include <type_traits>
+#include <vector>
 
 namespace chainbase
 {
@@ -133,10 +135,59 @@ namespace chainbase
       static void set_previous(node_ptr n, node_ptr previous) { set_left(n, previous); }
    };
 
-   template <typename Node, typename Tag>
+   template <class Tag>
+   struct ptr_node_base
+   {
+      ptr_node_base() = default;
+      ptr_node_base(const ptr_node_base&) {}
+      constexpr ptr_node_base& operator=(const ptr_node_base&) { return *this; }
+      ptr_node_base* _parent;
+      ptr_node_base* _left;
+      ptr_node_base* _right;
+      int _color;
+   };
+
+   template <class Tag>
+   struct ptr_node_traits
+   {
+      using node = ptr_node_base<Tag>;
+      using node_ptr = node*;
+      using const_node_ptr = const node*;
+      using color = int;
+      static node_ptr get_parent(const_node_ptr n) { return n->_parent; }
+      static void set_parent(node_ptr n, node_ptr parent) { n->_parent = parent; }
+      static node_ptr get_left(const_node_ptr n) { return n->_left; }
+      static void set_left(node_ptr n, node_ptr left) { n->_left = left; }
+      static node_ptr get_right(const_node_ptr n) { return n->_right; }
+      static void set_right(node_ptr n, node_ptr right) { n->_right = right; }
+      // red-black tree
+      static color get_color(node_ptr n) { return n->_color; }
+      static void set_color(node_ptr n, color c) { n->_color = c; }
+      static color black() { return 0; }
+      static color red() { return 1; }
+      // avl tree
+      using balance = int;
+      static balance get_balance(node_ptr n) { return n->_color; }
+      static void set_balance(node_ptr n, balance c) { n->_color = c; }
+      static balance negative() { return -1; }
+      static balance zero() { return 0; }
+      static balance positive() { return 1; }
+
+      // list
+      static node_ptr get_next(const_node_ptr n) { return get_right(n); }
+      static void set_next(node_ptr n, node_ptr next) { set_right(n, next); }
+      static node_ptr get_previous(const_node_ptr n) { return get_left(n); }
+      static void set_previous(node_ptr n, node_ptr previous) { set_left(n, previous); }
+   };
+
+   template <typename Tag, bool UseOffset>
+   using choose_node_traits =
+       boost::mp11::mp_if_c<UseOffset, offset_node_traits<Tag>, ptr_node_traits<Tag>>;
+
+   template <typename Node, typename Tag, bool UseOffset>
    struct offset_node_value_traits
    {
-      using node_traits = offset_node_traits<Tag>;
+      using node_traits = choose_node_traits<Tag, UseOffset>;
       using node_ptr = typename node_traits::node_ptr;
       using const_node_ptr = typename node_traits::const_node_ptr;
       using value_type = typename Node::value_type;
@@ -180,13 +231,13 @@ namespace chainbase
    template <typename Tag, typename... Indices>
    using find_tag = boost::mp11::mp_find<boost::mp11::mp_list<index_tag<Indices>...>, Tag>;
 
-   template <typename K, typename Allocator>
-   using hook = offset_node_base<K>;
+   template <typename K, bool UseOffset>
+   using hook = typename choose_node_traits<K, UseOffset>::node;
 
-   template <typename Node, typename OrderedIndex>
+   template <typename Node, typename OrderedIndex, bool UseOffset>
    using set_base = boost::intrusive::avltree<
        typename Node::value_type,
-       boost::intrusive::value_traits<offset_node_value_traits<Node, OrderedIndex>>,
+       boost::intrusive::value_traits<offset_node_value_traits<Node, OrderedIndex, UseOffset>>,
        boost::intrusive::key_of_value<
            get_key<typename OrderedIndex::key_from_value_type, typename Node::value_type>>,
        boost::intrusive::compare<typename OrderedIndex::compare_type>>;
@@ -197,9 +248,9 @@ namespace chainbase
    constexpr bool is_valid_index<boost::multi_index::ordered_unique<T...>> = true;
 
    template <typename Node, typename Tag>
-   using list_base =
-       boost::intrusive::slist<typename Node::value_type,
-                               boost::intrusive::value_traits<offset_node_value_traits<Node, Tag>>>;
+   using list_base = boost::intrusive::slist<
+       typename Node::value_type,
+       boost::intrusive::value_traits<offset_node_value_traits<Node, Tag, Node::use_offset>>>;
 
    template <typename L, typename It, typename Pred, typename Disposer>
    void remove_if_after_and_dispose(L& l, It it, It end, Pred&& p, Disposer&& d)
@@ -224,10 +275,10 @@ namespace chainbase
    template <typename T, typename Allocator, typename... Indices>
    class undo_index;
 
-   template <typename Node, typename OrderedIndex>
-   struct set_impl : private set_base<Node, OrderedIndex>
+   template <typename Node, typename OrderedIndex, bool UseOffset>
+   struct set_impl : private set_base<Node, OrderedIndex, UseOffset>
    {
-      using base_type = set_base<Node, OrderedIndex>;
+      using base_type = set_base<Node, OrderedIndex, UseOffset>;
       // Allow compatible keys to match multi_index
       template <typename K>
       auto find(K&& k) const
@@ -256,6 +307,10 @@ namespace chainbase
       using base_type::rbegin;
       using base_type::rend;
       using base_type::size;
+      friend bool operator==(const set_impl& lhs, const set_impl& rhs)
+      {
+         return static_cast<const base_type&>(lhs) == static_cast<const base_type&>(rhs);
+      }
       template <typename T, typename Allocator, typename... Indices>
       friend class undo_index;
    };
@@ -299,6 +354,8 @@ namespace chainbase
       using id_type = std::decay_t<decltype(std::declval<T>().id)>;
       using value_type = T;
       using allocator_type = Allocator;
+      static constexpr bool UseOffset =
+          !std::is_pointer_v<typename std::allocator_traits<Allocator>::pointer>;
 
       static_assert((... && is_valid_index<Indices>), "Only ordered_unique indices are supported");
 
@@ -320,10 +377,11 @@ namespace chainbase
             eosio::check(false, "content of memory does not match data expected by executable");
       }
 
-      struct node : hook<Indices, Allocator>..., value_holder<T>
+      struct node : hook<Indices, UseOffset>..., value_holder<T>
       {
          using value_type = T;
          using allocator_type = Allocator;
+         static constexpr bool use_offset = UseOffset;
          template <typename... A>
          explicit node(A&&... a) : value_holder<T>{static_cast<A&&>(a)...}
          {
@@ -333,7 +391,7 @@ namespace chainbase
       };
       static constexpr int erased_flag = 2;  // 0,1,and -1 are used by the tree
 
-      using indices_type = std::tuple<set_impl<node, Indices>...>;
+      using indices_type = std::tuple<set_impl<node, Indices, UseOffset>...>;
 
       using index0_set_type = std::tuple_element_t<0, indices_type>;
       using alloc_traits = typename std::allocator_traits<Allocator>::template rebind_traits<node>;
@@ -342,12 +400,13 @@ namespace chainbase
                     "first index must be id");
 
       using index0_type = boost::mp11::mp_first<boost::mp11::mp_list<Indices...>>;
-      struct old_node : hook<index0_type, Allocator>, value_holder<T>
+      struct old_node : hook<index0_type, UseOffset>, value_holder<T>
       {
          using value_type = T;
          using allocator_type = Allocator;
+         static constexpr bool use_offset = UseOffset;
          template <typename... A>
-         explicit old_node(const T& t) : value_holder<T>{t}
+         explicit old_node(const A&... a) : value_holder<T>{a...}
          {
          }
          uint64_t _mtime = 0;  // Backup of the node's _mtime, to be restored on undo
@@ -687,9 +746,9 @@ namespace chainbase
       template <int N, typename Iter>
       auto project(Iter iter) const
       {
-         if (iter == get<boost::mp11::mp_find<
-                         boost::mp11::mp_list<typename set_impl<node, Indices>::const_iterator...>,
-                         Iter>::value>()
+         if (iter == get<boost::mp11::mp_find<boost::mp11::mp_list<typename set_impl<
+                                                  node, Indices, UseOffset>::const_iterator...>,
+                                              Iter>::value>()
                          .end())
             return get<N>().end();
          return get<N>().iterator_to(*iter);
@@ -1088,8 +1147,183 @@ namespace chainbase
       // Returns the field indicating whether the node has been removed
       static int& get_removed_field(const value_type& obj)
       {
-         return static_cast<hook<index0_type, Allocator>&>(to_node(obj))._color;
+         return static_cast<hook<index0_type, UseOffset>&>(to_node(obj))._color;
       }
+
+      // Format:
+      // size: varint
+      // elements: [ T ]
+      // undo_stack_size: varint
+      // undo_stack:
+      //   [
+      //      num_old_values: varint
+      //      old_values: [ T ]
+      //      num_removed_values: varint
+      //      removed_values: [ T ]
+      //      old_next_id: uint64_t
+      //   ]
+      // next_id: uint64_t
+      // revision: uint64_t
+      //
+      template <typename S>
+      void to_bin_impl(S& stream) const
+      {
+         varuint64_to_bin(std::get<0>(_indices).size(), stream);
+         for (const auto& row : std::get<0>(_indices))
+         {
+            to_bin(row, stream);
+         }
+         varuint64_to_bin(_undo_stack.size(), stream);
+         for (auto iter = _undo_stack.begin(), end = _undo_stack.end(); iter != end; ++iter)
+         {
+            auto old_values_iter = _old_values.begin();
+            auto removed_values_iter = _removed_values.begin();
+            auto next = iter;
+            ++next;
+            if (next != end)
+            {
+               old_values_iter = get_old_values_end(*next);
+               removed_values_iter = get_removed_values_end(*next);
+            }
+            auto include_old = [&](auto& old_value) {
+               return to_node(old_value)._mtime < iter->ctime;
+            };
+            const auto& state = *iter;
+            auto old_values_end = get_old_values_end(*iter);
+            varuint64_to_bin(std::count_if(old_values_iter, old_values_end, include_old), stream);
+            for (; old_values_iter != old_values_end; ++old_values_iter)
+            {
+               if (include_old(*old_values_iter))
+               {
+                  to_bin(*old_values_iter, stream);
+               }
+            }
+            auto removed_values_end = get_removed_values_end(*iter);
+            varuint64_to_bin(std::distance(removed_values_iter, removed_values_end), stream);
+            for (; removed_values_iter != removed_values_end; ++removed_values_iter)
+            {
+               to_bin(*removed_values_iter, stream);
+            }
+            to_bin(state.old_next_id, stream);
+         }
+         to_bin(_next_id, stream);
+         to_bin(_revision, stream);
+      }
+
+      template <int N = 1>
+      void batch_insert(std::vector<T*>& nodes)
+      {
+         if constexpr (N < sizeof...(Indices))
+         {
+            auto& idx = std::get<N>(_indices);
+            std::sort(nodes.begin(), nodes.end(),
+                      [&](T* lhs, T* rhs) { return idx.value_comp()(*lhs, *rhs); });
+            for (T* node : nodes)
+            {
+               idx.push_back(*node);
+            }
+            batch_insert<N + 1>(nodes);
+         }
+      }
+
+      template <typename S>
+      void from_bin_impl(S& stream)
+      {
+         uint64_t count = varuint64_from_bin(stream);
+         {
+            std::vector<T*> nodes;
+            nodes.reserve(count);
+            for (uint64_t i = 0; i < count; ++i)
+            {
+               auto p = alloc_traits::allocate(_allocator, 1);
+               auto guard0 = scope_exit{[&] { alloc_traits::deallocate(_allocator, p, 1); }};
+               auto constructor = [&](value_type& v) { from_bin(v, stream); };
+               alloc_traits::construct(_allocator, &*p, constructor,
+                                       propagate_allocator(_allocator));
+               guard0.cancel();
+               std::get<0>(_indices).push_back(p->_item);
+               nodes.push_back(&p->_item);
+            }
+            batch_insert(nodes);
+         }
+         uint64_t undo_stack_count = varuint64_from_bin(stream);
+         for (uint64_t i = 0; i < undo_stack_count; ++i)
+         {
+            auto monotonic_revision = i + 1;
+            _undo_stack.push_back({_old_values.empty() ? nullptr : &*_old_values.begin(),
+                                   _removed_values.empty() ? nullptr : &*_removed_values.begin(), 0,
+                                   monotonic_revision});
+            auto num_old_values = varuint64_from_bin(stream);
+            for (uint64_t j = 0; j < num_old_values; ++j)
+            {
+               auto p = old_alloc_traits::allocate(_old_values_allocator, 1);
+               auto guard0 = scope_exit{[&] { _old_values_allocator.deallocate(p, 1); }};
+               old_alloc_traits::construct(
+                   _old_values_allocator, &*p, [&](auto& row) { from_bin(row, stream); },
+                   propagate_allocator(_allocator));
+               auto* obj = find(p->_item.id);
+               if (!obj)
+               {
+                  // Temporarily insert into the primary index.
+                  // This node has been erased, but we need to be able to access it
+                  // to set mtime  correctly.  It is safe to insert it in the primary index
+                  // because the primary key is never reused.  It must not be inserted
+                  // in any other index, because that could create a conflict.
+                  // There must be an erase for this node in a later undo state,
+                  // and we will remove it from the primary index when we see the erase.
+                  auto temp_obj = alloc_traits::allocate(_allocator, 1);
+                  auto guard1 =
+                      scope_exit{[&] { alloc_traits::deallocate(_allocator, temp_obj, 1); }};
+                  auto constructor = [&](value_type& v) { v.id = p->_item.id; };
+                  alloc_traits::construct(_allocator, &*temp_obj, constructor,
+                                          propagate_allocator(_allocator));
+                  guard1.cancel();
+                  std::get<0>(_indices).insert_unique(temp_obj->_item);
+                  obj = &temp_obj->_item;
+               }
+               p->_mtime = to_node(*obj)._mtime;
+               p->_current = &to_node(*obj);
+               guard0.cancel();
+               _old_values.push_front(p->_item);
+               to_node(*obj)._mtime = monotonic_revision;
+            }
+            auto num_removed_values = varuint64_from_bin(stream);
+            for (uint64_t j = 0; j < num_removed_values; ++j)
+            {
+               auto p = alloc_traits::allocate(_allocator, 1);
+               auto guard0 = scope_exit{[&] { alloc_traits::deallocate(_allocator, p, 1); }};
+               auto constructor = [&](value_type& v) { from_bin(v, stream); };
+               alloc_traits::construct(_allocator, &*p, constructor,
+                                       propagate_allocator(_allocator));
+               guard0.cancel();
+               if (auto* existing = const_cast<T*>(find(p->_item.id)))
+               {
+                  *existing = std::move(p->_item);
+                  std::get<0>(_indices).erase(std::get<0>(_indices).iterator_to(*existing));
+                  dispose_node(*p);
+                  p = &to_node(*existing);
+               }
+               get_removed_field(p->_item) = erased_flag;
+               _removed_values.push_front(p->_item);
+            }
+            from_bin(_undo_stack.back().old_next_id, stream);
+         }
+         from_bin(_next_id, stream);
+         from_bin(_revision, stream);
+         _monotonic_revision = undo_stack_count;
+      }
+
+      template <typename S>
+      friend void to_bin(const undo_index& self, S& stream)
+      {
+         self.to_bin_impl(stream);
+      }
+      template <typename S>
+      friend void from_bin(undo_index& self, S& stream)
+      {
+         self.from_bin_impl(stream);
+      }
+
       using old_alloc_traits =
           typename std::allocator_traits<Allocator>::template rebind_traits<old_node>;
       indices_type _indices;

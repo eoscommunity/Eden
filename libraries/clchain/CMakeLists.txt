@@ -24,3 +24,7 @@ add("")
 if(DEFINED IS_WASM)
     add("-debug")
 endif()
+
+if(DEFINED IS_NATIVE)
+  add_subdirectory(test)
+endif()

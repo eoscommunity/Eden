@@ -53,6 +53,18 @@ namespace chainbase
       int64_t _id = 0;
    };
 
+   template <typename T, typename S>
+   void to_bin(const oid<T>& id, S& stream)
+   {
+      to_bin(id._id, stream);
+   }
+
+   template <typename T, typename S>
+   void from_bin(oid<T>& id, S& stream)
+   {
+      from_bin(id._id, stream);
+   }
+
    template <uint16_t TypeNumber, typename Derived>
    struct object
    {
