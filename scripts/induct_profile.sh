@@ -2,11 +2,13 @@
 set -xe
 
 CLEOS="cleos -u https://waxtest.eosn.io"
-CONTRACT="test2.edev"
+CONTRACT="test.edev"
+ADD_TO_ID=100
 
 for PARMS in $(cat ./genesis_accounts_long_list); do
   ACCOUNT_NAME=$(echo $PARMS | cut -d "," -f1);
   INDUCTION_ID=$(echo $PARMS | cut -d "," -f2);
+  ID=$((INDUCTION_ID+ADD_TO_ID))
   IMAGE=$(echo $PARMS | cut -d "," -f3);
   FNAME=$(echo $PARMS | cut -d "," -f4);
   LNAME=$(echo $PARMS | cut -d "," -f5);
@@ -22,7 +24,7 @@ for PARMS in $(cat ./genesis_accounts_long_list); do
   SOCIAL_BLOG="moreequalanimals.com"
 
   PROFILE_ACTION_DATA="{
-    \"id\": $INDUCTION_ID,
+    \"id\": $ID,
     \"new_member_profile\": {
       \"name\": \"$FNAME $LNAME\",
       \"img\": \"$IMAGE\",
